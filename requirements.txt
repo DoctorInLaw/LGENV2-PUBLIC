@@ -1,0 +1,5 @@
+python-telegram-bot==20.0b1
+python-dotenv==1.0.0
+Flask==2.2.5
+dotenv
+telegram
