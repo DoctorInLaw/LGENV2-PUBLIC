@@ -1,7 +1,7 @@
 import os
 import random
 import string
-import sqlite3
+import psycopg2
 from datetime import datetime, timedelta
 from threading import Thread
 from flask import Flask
@@ -23,7 +23,7 @@ app = Flask(__name__)
 def home():
     return "✅ Bot is alive!"
 
-conn = sqlite3.connect("data.db", check_same_thread=False)
+conn = psycopg2.connect(os.getenv("DATABASE_URL"))
 cur = conn.cursor()
 cur.execute("CREATE TABLE IF NOT EXISTS keys (key TEXT PRIMARY KEY, channels TEXT, bound_user INTEGER, expiry TEXT, revoked INTEGER)")
 cur.execute("CREATE TABLE IF NOT EXISTS aliases (alias TEXT PRIMARY KEY, channel_id TEXT)")
