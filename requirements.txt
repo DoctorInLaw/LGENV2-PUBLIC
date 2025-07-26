@@ -3,3 +3,4 @@ python-dotenv==1.0.0
 Flask==2.2.5
 dotenv
 telegram
+psycopg2-binary
