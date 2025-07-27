@@ -69,6 +69,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     "🧠 Need help? Type `/help` to see what I can do.\n\n"
     "💎 *This is not just another bot — it's your gateway to premium content.*",
     parse_mode="Markdown"
+    )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
