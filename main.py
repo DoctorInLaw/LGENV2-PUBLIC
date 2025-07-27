@@ -19,6 +19,8 @@ load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_USER_ID"))
+LOCKED = False
+ADMINS = {ADMIN_ID}
 ADMIN_CONTACT = os.getenv("ADMIN_CONTACT")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.environ.get("PORT", 8080))
@@ -169,6 +171,9 @@ async def remind3(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # === KEY REDEMPTION ===
 async def use(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    if LOCKED and user_id not in ADMINS:
+    await update.message.reply_text("🔒 The bot is currently under maintenance. Try again later.")
+    return
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /use <KEY>")
         return
@@ -392,6 +397,223 @@ async def setadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ADMIN_CONTACT = context.args[0]
     await update.message.reply_text("✅ Admin contact updated.")
 
+async def purgeexpired(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    now = datetime.utcnow()
+    cur.execute("SELECT key, bound_user, channels, expiry FROM keys WHERE expiry IS NOT NULL AND revoked = 0")
+    expired = 0
+
+    for k, user_id, ch_str, expiry in cur.fetchall():
+        expiry_dt = datetime.fromisoformat(expiry)
+        if now > expiry_dt:
+            if user_id:
+                for ch in ch_str.split("+"):
+                    try:
+                        await context.bot.ban_chat_member(ch, user_id)
+                        await context.bot.unban_chat_member(ch, user_id)
+                    except:
+                        pass
+            cur.execute("UPDATE keys SET revoked = 1 WHERE key = %s", (k,))
+            expired += 1
+
+    conn.commit()
+    await update.message.reply_text(f"🧹 {expired} expired keys processed.\n👤 Bound users removed from channels.")
+
+# === ADMIN EXTENSIONS ===
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    cur.execute("SELECT COUNT(*) FROM keys"); total_keys = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM keys WHERE revoked = 0"); active_keys = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM keys WHERE revoked = 1"); revoked_keys = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(DISTINCT bound_user) FROM keys WHERE bound_user IS NOT NULL"); users = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM aliases"); alias_count = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(DISTINCT group_name) FROM groups"); group_count = cur.fetchone()[0]
+
+    await update.message.reply_text(
+        f"📊 *Bot Stats*\n\n"
+        f"🔑 Total Keys: {total_keys}\n"
+        f"✅ Active Keys: {active_keys}\n"
+        f"❌ Revoked Keys: {revoked_keys}\n"
+        f"👥 Unique Users: {users}\n"
+        f"🏷️ Aliases: {alias_count}\n"
+        f"🗂️ Groups: {group_count}",
+        parse_mode="Markdown")
+
+async def backup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    buffer = io.BytesIO()
+    zip_writer = csv.writer(buffer)
+
+    cur.execute("SELECT * FROM keys")
+    keys_data = cur.fetchall()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['Key', 'Channels', 'User', 'Expiry', 'Revoked'])
+    writer.writerows(keys_data)
+    output.seek(0)
+
+    await update.message.reply_document(document=output.getvalue(), filename="keys_backup.csv")
+
+async def migratealias(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /migratealias <old> <new>")
+        return
+    old, new = context.args
+    cur.execute("UPDATE aliases SET channel_id = %s WHERE alias = %s", (new, old))
+    cur.execute("UPDATE groups SET alias = %s WHERE alias = %s", (new, old))
+    conn.commit()
+    await update.message.reply_text(f"🔁 Alias `{old}` migrated to `{new}`", parse_mode="Markdown")
+
+async def whohas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /whohas <alias/group>")
+        return
+    target = context.args[0]
+    cur.execute("SELECT alias FROM groups WHERE group_name = %s", (target,))
+    group_rows = cur.fetchall()
+    aliases = [target] if not group_rows else [r[0] for r in group_rows]
+
+    cur.execute("SELECT key, bound_user FROM keys")
+    out = ""
+    for k, uid in cur.fetchall():
+        cur.execute("SELECT channels FROM keys WHERE key = %s", (k,))
+        ch = cur.fetchone()[0].split("+")
+        if any(a in ch for a in aliases):
+            out += f"{k} → {uid}\n"
+    await update.message.reply_text(out or "No users found.")
+
+async def renew(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    if len(context.args) != 2:
+        await update.message.reply_text("Usage: /renew <KEY> <1d2h or L>")
+        return
+    k, duration = context.args
+    cur.execute("SELECT key FROM keys WHERE key = %s", (k,))
+    if not cur.fetchone():
+        await update.message.reply_text("❌ Key does not exist. Cannot renew.")
+        return
+    td = parse_duration(duration)
+    expiry = (datetime.utcnow() + td).isoformat() if td else None
+    cur.execute("UPDATE keys SET expiry = %s WHERE key = %s", (expiry, k))
+    conn.commit()
+    await update.message.reply_text("🔁 Key renewed successfully.")
+
+async def renewall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /renewall <1d2h or L>")
+        return
+    dur = context.args[0]
+    td = parse_duration(dur)
+    expiry = (datetime.utcnow() + td).isoformat() if td else None
+    cur.execute("UPDATE keys SET expiry = %s WHERE revoked = 0", (expiry,))
+    conn.commit()
+    await update.message.reply_text(f"🔁 All active keys renewed with expiry: `{expiry or 'Lifetime'}`", parse_mode="Markdown")
+
+async def addkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    if len(context.args) < 2:
+        await update.message.reply_text("Usage: /addkey <CUSTOM_KEY> <1d2h or L> <alias1+alias2+...>")
+        return
+    custom_key = context.args[0]
+    duration = context.args[1]
+    aliases = context.args[2] if len(context.args) > 2 else ""
+    td = parse_duration(duration)
+    expiry = (datetime.utcnow() + td).isoformat() if td else None
+    cur.execute("INSERT INTO keys VALUES (%s, %s, %s, %s, %s)", (custom_key, aliases, None, expiry, 0))
+    conn.commit()
+    await update.message.reply_text(f"✅ Custom key `{custom_key}` created.", parse_mode="Markdown")
+
+async def resetbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    await update.message.reply_text("⚠️ Are you sure you want to reset the bot? Type `/confirmreset` to proceed.")
+
+async def confirmreset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    # Export everything
+    tables = ['keys', 'aliases', 'groups']
+    for table in tables:
+        cur.execute(f"SELECT * FROM {table}")
+        rows = cur.fetchall()
+        output = io.StringIO()
+        writer = csv.writer(output)
+        if table == 'keys':
+            writer.writerow(['Key', 'Channels', 'BoundUser', 'Expiry', 'Revoked'])
+        elif table == 'aliases':
+            writer.writerow(['Alias', 'Channel ID'])
+        elif table == 'groups':
+            writer.writerow(['Group Name', 'Alias'])
+        writer.writerows(rows)
+        output.seek(0)
+        await update.message.reply_document(document=output.getvalue(), filename=f"{table}_backup.csv")
+    
+    # Clear all data
+    for table in tables:
+        cur.execute(f"DELETE FROM {table}")
+    conn.commit()
+    await update.message.reply_text("🧨 Bot reset completed. All data wiped.")
+
+# Multi-admin support
+async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMINS: return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /addadmin <user_id>")
+        return
+    uid = int(context.args[0])
+    ADMINS.add(uid)
+    await update.message.reply_text(f"✅ User `{uid}` added to admin list.", parse_mode="Markdown")
+
+async def rmadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMINS: return
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /rmadmin <user_id>")
+        return
+    uid = int(context.args[0])
+    if uid == ADMIN_ID:
+        await update.message.reply_text("❌ Cannot remove the root admin.")
+        return
+    ADMINS.discard(uid)
+    await update.message.reply_text(f"🗑️ User `{uid}` removed from admins.", parse_mode="Markdown")
+
+async def admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMINS: return
+    out = "\n".join([f"👑 {uid}" for uid in ADMINS])
+    await update.message.reply_text(f"📋 *Current Admins:*\n{out}", parse_mode="Markdown")
+
+# Lock/Unlock
+async def lockbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global LOCKED
+    if update.effective_user.id not in ADMINS: return
+    LOCKED = True
+    await update.message.reply_text("🚫 Bot is now LOCKED. Users cannot use /use command.")
+
+async def unlockbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global LOCKED
+    if update.effective_user.id not in ADMINS: return
+    LOCKED = False
+    await update.message.reply_text("✅ Bot is now UNLOCKED. Users can redeem keys again.")
+
+async def maintenance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMINS: return
+    msg = "🚧 We’re performing maintenance. Some features may be unavailable temporarily."
+    if context.args:
+        msg += "\n" + " ".join(context.args)
+    cur.execute("SELECT DISTINCT bound_user FROM keys WHERE bound_user IS NOT NULL")
+    for row in cur.fetchall():
+        try:
+            await context.bot.send_message(row[0], msg)
+        except: pass
+    await update.message.reply_text("📢 Maintenance message sent to all users.")
+
+
+
+
+
 # === REGISTER HANDLERS ===
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("help", help_cmd))
@@ -415,6 +637,20 @@ dispatcher.add_handler(CommandHandler("clearkeys", clearkeys))
 dispatcher.add_handler(CommandHandler("listkeys", listkeys))
 dispatcher.add_handler(CommandHandler("exportkeys", exportkeys))
 dispatcher.add_handler(CommandHandler("setadmin", setadmin))
+dispatcher.add_handler(CommandHandler("purgeexpired", purgeexpired))
+dispatcher.add_handler(CommandHandler("renewall", renewall))
+dispatcher.add_handler(CommandHandler("addkey", addkey))
+dispatcher.add_handler(CommandHandler("resetbot", resetbot))
+dispatcher.add_handler(CommandHandler("confirmreset", confirmreset))
+dispatcher.add_handler(CommandHandler("lockbot", lockbot))
+dispatcher.add_handler(CommandHandler("unlockbot", unlockbot))
+dispatcher.add_handler(CommandHandler("maintenance", maintenance))
+dispatcher.add_handler(CommandHandler("addadmin", addadmin))
+dispatcher.add_handler(CommandHandler("rmadmin", rmadmin))
+dispatcher.add_handler(CommandHandler("admins", admins))
+
+
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
