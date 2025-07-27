@@ -195,8 +195,14 @@ async def use(update: Update, context: ContextTypes.DEFAULT_TYPE):
         expiry_dt = datetime.fromisoformat(expiry) if expiry else None
 
     if expiry_dt and datetime.utcnow() > expiry_dt:
-        await update.message.reply_text("⏳ Your key has expired. Please contact admin.")
-        return
+    for ch in channels.split("+"):
+        try:
+            await context.bot.ban_chat_member(ch, user_id)
+            await context.bot.unban_chat_member(ch, user_id)
+        except: pass
+    await update.message.reply_text("⏳ Your key has expired. Access removed from all channels. Please contact admin.")
+    return
+
 
     ch_list = channels.split("+")
     for ch in ch_list:
@@ -305,15 +311,37 @@ async def revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /revoke <KEY>")
         return
     k = context.args[0]
+    cur.execute("SELECT bound_user, channels FROM keys WHERE key = %s", (k,))
+    row = cur.fetchone()
+    if not row:
+        await update.message.reply_text("❌ Key not found.")
+        return
+    bound_user, channels = row
     cur.execute("UPDATE keys SET revoked = 1 WHERE key = %s", (k,))
     conn.commit()
-    await update.message.reply_text("🔒 Key revoked.")
+    if bound_user:
+        for ch in channels.split("+"):
+            try:
+                await context.bot.ban_chat_member(ch, bound_user)
+                await context.bot.unban_chat_member(ch, bound_user)
+            except: pass
+    await update.message.reply_text("🔒 Key revoked and user removed from channels.")
+
 
 async def revokeall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
-    cur.execute("UPDATE keys SET revoked = 1 WHERE revoked = 0")
+    cur.execute("SELECT key, bound_user, channels FROM keys WHERE revoked = 0")
+    for k, bound_user, channels in cur.fetchall():
+        cur.execute("UPDATE keys SET revoked = 1 WHERE key = %s", (k,))
+        if bound_user:
+            for ch in channels.split("+"):
+                try:
+                    await context.bot.ban_chat_member(ch, bound_user)
+                    await context.bot.unban_chat_member(ch, bound_user)
+                except: pass
     conn.commit()
-    await update.message.reply_text("🔐 All keys revoked.")
+    await update.message.reply_text("🔐 All keys revoked and users removed from channels.")
+
 
 async def keyinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
