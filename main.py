@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from flask import Flask, request
 from dotenv import load_dotenv
 from telegram import Update, Bot
-from telegram.ext import Application, CommandHandler, ContextTypes, Dispatcher
+from telegram.ext import Application, CommandHandler, ContextTypes,
 import telegram
 import asyncio
 
